@@ -33,9 +33,16 @@ class WatchAudioRouter(private val context: Context) {
     private val am = context.getSystemService(AudioManager::class.java)
     private var headset: BluetoothHeadset? = null
 
-    var active = false
-        private set
-    private var usingLegacySco = false
+    private enum class Method { NONE, DIRECT, CALL, LEGACY }
+
+    private var method = Method.NONE
+
+    /** True while we hold (or are opening) the watch's audio link. */
+    val active get() = when (method) {
+        Method.NONE -> false
+        Method.CALL -> WatchCall.isActive
+        else -> true
+    }
 
     /** Last SCO state reported by the system (legacy path), for diagnostics. */
     var scoState = "unknown"
@@ -127,38 +134,53 @@ class WatchAudioRouter(private val context: Context) {
     fun watchName(): String? =
         findAudioDevice()?.productName?.toString()?.takeIf { it.isNotBlank() } ?: handsFreeName()
 
-    /** Opens the call channel to the watch. With [force], tries even if nothing is detected. */
+    /**
+     * Opens the audio link to the watch. Tries, in order:
+     * 1. Selecting the watch directly as the communication device (works on many phones).
+     * 2. A silent self-managed VoIP call through Telecom (phones that only open
+     *    Bluetooth call audio for real calls, e.g. OnePlus on Android 16).
+     * 3. The legacy SCO API (old Android versions).
+     * With [force], tries even if no watch is detected.
+     */
     fun start(force: Boolean = false): Boolean {
         if (active) return true
         val device = findAudioDevice()
-        if (device == null && handsFreeDevices().isEmpty() && !force) return false
+        val handsFree = handsFreeDevices().isNotEmpty()
+        if (device == null && !handsFree && !force) return false
 
-        am.mode = AudioManager.MODE_IN_COMMUNICATION
-        var ok = false
         if (device != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ok = runCatching { am.setCommunicationDevice(device) }.getOrDefault(false)
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            if (runCatching { am.setCommunicationDevice(device) }.getOrDefault(false)) {
+                method = Method.DIRECT
+                return true
+            }
+            am.mode = AudioManager.MODE_NORMAL
         }
-        if (!ok) {
-            // Legacy path: asks the Bluetooth stack to open SCO to the hands-free device.
-            startScoLegacy()
-            usingLegacySco = true
-            ok = true
+        if (WatchCall.start(context)) {
+            method = Method.CALL
+            return true
         }
-        active = ok
-        return ok
+        am.mode = AudioManager.MODE_IN_COMMUNICATION
+        startScoLegacy()
+        method = Method.LEGACY
+        return true
     }
 
-    /** Closes the call channel so the watch is free again. */
+    /** Closes the audio link so the watch is free again. */
     fun stop() {
-        if (!active) return
-        if (usingLegacySco) {
-            stopScoLegacy()
-            usingLegacySco = false
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            am.clearCommunicationDevice()
+        when (method) {
+            Method.NONE -> return
+            Method.DIRECT -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.clearCommunicationDevice()
+                am.mode = AudioManager.MODE_NORMAL
+            }
+            Method.CALL -> WatchCall.stop()
+            Method.LEGACY -> {
+                stopScoLegacy()
+                am.mode = AudioManager.MODE_NORMAL
+            }
         }
-        am.mode = AudioManager.MODE_NORMAL
-        active = false
+        method = Method.NONE
     }
 
     /** Watch volume = the phone's call volume while routing. */
@@ -179,7 +201,13 @@ class WatchAudioRouter(private val context: Context) {
         appendLine("Hands-free (call) devices: " +
             if (hf.isEmpty()) "none" else hf.joinToString { runCatching { it.name }.getOrNull() ?: "?" })
         appendLine("Detected watch audio device: ${findAudioDevice()?.let { describe(it) } ?: "none"}")
-        appendLine("Routing active: $active (legacy SCO: $usingLegacySco)")
+        appendLine("Routing active: $active (method: $method)")
+        appendLine("Watch call: ${when {
+            WatchCall.connection != null -> "active"
+            WatchCall.pending -> "starting"
+            else -> "none"
+        }}, route: ${WatchCall.lastRoute}")
+        WatchCall.lastError?.let { appendLine("Watch call error: $it") }
         appendLine("SCO state: $scoState")
         appendLine("Audio mode: ${am.mode}")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

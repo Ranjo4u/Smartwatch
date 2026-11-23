@@ -101,6 +101,15 @@ class MusicService : Service() {
         super.onCreate()
         router = WatchAudioRouter(this)
         router.onChanged = { publish() }
+        WatchCall.onChanged = { if (WatchCall.lastError != null && !router.active) message = WatchCall.lastError; publish() }
+        WatchCall.onEndedExternally = {
+            // Hung up from the watch: pause instead of switching to the phone.
+            if (playing) {
+                message = "Call ended on watch – paused"
+                pause()
+            }
+            publish()
+        }
         diagnostics = { router.diagnostics() }
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
@@ -143,6 +152,8 @@ class MusicService : Service() {
         releasePlayer()
         router.stop()
         router.onChanged = null
+        WatchCall.onChanged = null
+        WatchCall.onEndedExternally = null
         router.release()
         diagnostics = null
         state = PlayerState()

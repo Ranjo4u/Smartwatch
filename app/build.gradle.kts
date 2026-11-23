@@ -11,8 +11,8 @@ android {
         applicationId = "com.smartwatch.watchtunes"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     // Fixed debug key so every CI build can install as an update of the previous one.

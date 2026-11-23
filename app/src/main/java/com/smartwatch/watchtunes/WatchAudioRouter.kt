@@ -132,7 +132,7 @@ class WatchAudioRouter(private val context: Context) {
     fun isWatchConnected() = findAudioDevice() != null || handsFreeDevices().isNotEmpty()
 
     fun watchName(): String? =
-        findAudioDevice()?.productName?.toString()?.takeIf { it.isNotBlank() } ?: handsFreeName()
+        handsFreeName() ?: findAudioDevice()?.productName?.toString()?.takeIf { it.isNotBlank() }
 
     /**
      * Opens the audio link to the watch. Tries, in order:

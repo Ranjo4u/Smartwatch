@@ -2,6 +2,8 @@ package com.smartwatch.watchtunes
 
 import android.content.ComponentName
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -54,7 +56,24 @@ object WatchCall {
 
     val isActive get() = connection != null || pending
 
-    private val main = Handler(Looper.getMainLooper())
+    internal val main = Handler(Looper.getMainLooper())
+    private var appContext: Context? = null
+    private var forcedDevice = false
+
+    /**
+     * Fallback when Telecom won't switch the call to Bluetooth: select the
+     * watch's SCO device ourselves (it only appears once the call is active).
+     */
+    internal fun forceWatchDevice(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+        val am = appContext?.getSystemService(AudioManager::class.java) ?: return false
+        val sco = am.availableCommunicationDevices
+            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ?: return false
+        if (am.communicationDevice?.id == sco.id) return true
+        val ok = runCatching { am.setCommunicationDevice(sco) }.getOrDefault(false)
+        if (ok) forcedDevice = true
+        return ok
+    }
 
     internal fun notifyChanged() {
         main.post { onChanged?.invoke() }
@@ -75,6 +94,7 @@ object WatchCall {
     /** Starts the silent call. Returns false if Android refused straight away. */
     fun start(ctx: Context): Boolean {
         if (isActive) return true
+        appContext = ctx.applicationContext
         return try {
             register(ctx)
             val tm = ctx.getSystemService(TelecomManager::class.java)
@@ -99,6 +119,10 @@ object WatchCall {
     /** Ends the silent call so the watch is free again. */
     fun stop() {
         pending = false
+        if (forcedDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            appContext?.getSystemService(AudioManager::class.java)?.clearCommunicationDevice()
+        }
+        forcedDevice = false
         connection?.endCall(fromUser = false)
         connection = null
         lastRoute = "none"
@@ -137,10 +161,22 @@ class WatchConnectionService : ConnectionService() {
 class WatchConnection : Connection() {
 
     private var ended = false
+    private var btEndpoint: CallEndpoint? = null
+    private var currentType = -1
+    private var attempts = 0
+    private var requestInFlight = false
+
+    private val switchToWatch = Runnable { trySwitch() }
+
+    private fun scheduleSwitch(delayMs: Long) {
+        WatchCall.main.removeCallbacks(switchToWatch)
+        WatchCall.main.postDelayed(switchToWatch, delayMs)
+    }
 
     fun endCall(fromUser: Boolean) {
         if (ended) return
         ended = true
+        WatchCall.main.removeCallbacks(switchToWatch)
         setDisconnected(DisconnectCause(if (fromUser) DisconnectCause.REMOTE else DisconnectCause.LOCAL))
         destroy()
         if (WatchCall.connection === this) WatchCall.connection = null
@@ -176,26 +212,54 @@ class WatchConnection : Connection() {
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     override fun onAvailableCallEndpointsChanged(endpoints: List<CallEndpoint>) {
-        val bt = endpoints.firstOrNull { it.endpointType == CallEndpoint.TYPE_BLUETOOTH } ?: return
+        btEndpoint = endpoints.firstOrNull { it.endpointType == CallEndpoint.TYPE_BLUETOOTH }
+        // Wait a moment: Telecom is often still settling the route, and a request
+        // sent now gets cancelled by its own ("canceled by another request").
+        if (btEndpoint != null) scheduleSwitch(600)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    override fun onCallEndpointChanged(endpoint: CallEndpoint) {
+        currentType = endpoint.endpointType
+        WatchCall.lastRoute = "${endpoint.endpointName} (${endpointType(endpoint.endpointType)})"
+        if (currentType != CallEndpoint.TYPE_BLUETOOTH && btEndpoint != null) scheduleSwitch(600)
+        WatchCall.notifyChanged()
+    }
+
+    /** One request at a time; retry a few times, then select the device directly. */
+    private fun trySwitch() {
+        if (ended || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        val bt = btEndpoint ?: return
+        if (currentType == CallEndpoint.TYPE_BLUETOOTH || requestInFlight) return
+        attempts++
+        if (attempts > 3) {
+            // Telecom keeps refusing: pick the watch's audio device ourselves.
+            if (WatchCall.forceWatchDevice()) {
+                WatchCall.lastRoute = "watch (selected directly)"
+                WatchCall.lastError = null
+                WatchCall.notifyChanged()
+            }
+            if (attempts > 10) return
+        }
+        requestInFlight = true
         requestCallEndpointChange(
             bt,
             { it.run() },
             object : OutcomeReceiver<Void, CallEndpointException> {
                 override fun onResult(result: Void?) {
+                    requestInFlight = false
+                    WatchCall.lastError = null
                     WatchCall.notifyChanged()
                 }
+
                 override fun onError(error: CallEndpointException) {
-                    WatchCall.lastError = "Couldn't switch to watch: ${error.message}"
+                    requestInFlight = false
+                    WatchCall.lastError = "Switch attempt $attempts failed: ${error.message}"
                     WatchCall.notifyChanged()
+                    WatchCall.main.post { scheduleSwitch(1000) }
                 }
             },
         )
-    }
-
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    override fun onCallEndpointChanged(endpoint: CallEndpoint) {
-        WatchCall.lastRoute = "${endpoint.endpointName} (${endpointType(endpoint.endpointType)})"
-        WatchCall.notifyChanged()
     }
 
     private fun endpointType(t: Int) = when (t) {

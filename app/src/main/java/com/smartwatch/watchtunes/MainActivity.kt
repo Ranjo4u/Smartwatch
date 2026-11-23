@@ -1,6 +1,8 @@
 package com.smartwatch.watchtunes
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioDeviceCallback
@@ -18,6 +20,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.materialswitch.MaterialSwitch
@@ -47,7 +50,10 @@ class MainActivity : AppCompatActivity() {
         }
 
     private val askPermissions =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refreshWatch() }
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            router.connectHeadsetProxy()
+            refreshWatch()
+        }
 
     private val stateListener: (PlayerState) -> Unit = { render(it) }
 
@@ -60,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         router = WatchAudioRouter(this)
+        router.onChanged = { refreshWatch() }
 
         watchStatus = findViewById(R.id.watchStatus)
         routeStatus = findViewById(R.id.routeStatus)
@@ -88,6 +95,7 @@ class MainActivity : AppCompatActivity() {
             if (MusicService.state.running) MusicService.send(this, MusicService.ACTION_STOP)
         }
 
+        findViewById<Button>(R.id.diagBtn).setOnClickListener { showDiagnostics() }
         findViewById<Button>(R.id.volUp).setOnClickListener { router.adjustVolume(up = true) }
         findViewById<Button>(R.id.volDown).setOnClickListener { router.adjustVolume(up = false) }
 
@@ -154,6 +162,26 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
     }
 
+    override fun onDestroy() {
+        router.onChanged = null
+        router.release()
+        super.onDestroy()
+    }
+
+    private fun showDiagnostics() {
+        val text = (MusicService.diagnostics ?: router::diagnostics).invoke()
+        AlertDialog.Builder(this)
+            .setTitle("Diagnostics")
+            .setMessage(text)
+            .setPositiveButton("Copy") { _, _ ->
+                getSystemService(ClipboardManager::class.java)
+                    .setPrimaryClip(ClipData.newPlainText("WatchTunes diagnostics", text))
+                Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
     private fun boostText(step: Int) = "Loudness boost: +${step} dB" +
         if (step >= 10) " (may distort)" else ""
 
@@ -172,11 +200,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshWatch() {
-        val found = router.findWatch() != null
-        watchStatus.text = if (found) {
-            "⌚ Watch connected" + (router.watchName()?.let { ": $it" } ?: "")
-        } else {
-            "⌚ Watch not found – connect it in Bluetooth settings (calling must work)"
+        watchStatus.text = when {
+            router.isWatchConnected() ->
+                "⌚ Watch connected" + (router.watchName()?.let { ": $it" } ?: "")
+            !router.hasBluetoothPermission() ->
+                "⌚ Allow the Bluetooth (Nearby devices) permission so the app can find your watch"
+            else ->
+                "⌚ Watch call audio not detected – you can still press Play to try. Tap Diagnostics for details."
         }
     }
 

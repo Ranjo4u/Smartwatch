@@ -19,6 +19,13 @@
         android:layout_marginTop="4dp"
         android:textAppearance="?attr/textAppearanceBodyMedium" />
 
+    <Button
+        android:id="@+id/diagBtn"
+        style="?attr/borderlessButtonStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Diagnostics" />
+
     <com.google.android.material.materialswitch.MaterialSwitch
         android:id="@+id/watchSwitch"
         android:layout_width="match_parent"

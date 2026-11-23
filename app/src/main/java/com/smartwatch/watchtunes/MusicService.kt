@@ -54,6 +54,10 @@ class MusicService : Service() {
             listeners -= l
         }
 
+        /** Diagnostics from the live router while the service runs. */
+        var diagnostics: (() -> String)? = null
+            private set
+
         fun send(context: Context, action: String, index: Int = 0) {
             val intent = Intent(context, MusicService::class.java)
                 .setAction(action)
@@ -75,12 +79,13 @@ class MusicService : Service() {
     private var playing = false
     private var playerUsesWatch = true
     private var message: String? = null
+    private var watchSeenAtStart = false
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = publish()
 
         override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) {
-            if (router.active && router.findWatch() == null) {
+            if (router.active && watchSeenAtStart && !router.isWatchConnected()) {
                 // Watch went out of range: pause instead of blasting the phone speaker.
                 message = "Watch disconnected"
                 pause()
@@ -95,6 +100,8 @@ class MusicService : Service() {
     override fun onCreate() {
         super.onCreate()
         router = WatchAudioRouter(this)
+        router.onChanged = { publish() }
+        diagnostics = { router.diagnostics() }
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Playback", NotificationManager.IMPORTANCE_LOW)
@@ -135,6 +142,9 @@ class MusicService : Service() {
         getSystemService(AudioManager::class.java).unregisterAudioDeviceCallback(deviceCallback)
         releasePlayer()
         router.stop()
+        router.onChanged = null
+        router.release()
+        diagnostics = null
         state = PlayerState()
         listeners.toList().forEach { it(state) }
         super.onDestroy()
@@ -266,9 +276,11 @@ class MusicService : Service() {
     private fun updateRouting() {
         val need = (playing && Prefs.toWatch(this)) || Prefs.routeAll(this)
         if (need && !router.active) {
-            if (!router.start()) {
-                message = "Watch not connected – pair it in Bluetooth settings (calls must work)"
+            watchSeenAtStart = router.isWatchConnected()
+            if (!watchSeenAtStart) {
+                message = "Watch call audio not detected – trying anyway. Tap Diagnostics if you hear nothing."
             }
+            router.start(force = true)
         } else if (!need && router.active) {
             router.stop()
         }

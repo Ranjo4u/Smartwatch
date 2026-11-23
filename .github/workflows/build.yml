@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,7 +20,19 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon
+      - run: cp app/build/outputs/apk/debug/app-debug.apk WatchTunes.apk
       - uses: actions/upload-artifact@v4
         with:
           name: WatchTunes-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: WatchTunes.apk
+      # Stable phone-friendly link:
+      # https://github.com/<owner>/<repo>/releases/latest/download/WatchTunes.apk
+      - name: Publish to "latest" release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: WatchTunes (latest build)
+          body: "Latest WatchTunes build from ${{ github.sha }}. Download WatchTunes.apk below and install it on your Android phone."
+          files: WatchTunes.apk
+          make_latest: true

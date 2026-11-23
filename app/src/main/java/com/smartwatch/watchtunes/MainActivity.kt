@@ -65,6 +65,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        supportActionBar?.subtitle = "Version ${BuildConfig.VERSION_NAME}"
         router = WatchAudioRouter(this)
         router.onChanged = { refreshWatch() }
 
